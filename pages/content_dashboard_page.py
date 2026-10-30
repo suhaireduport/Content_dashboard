@@ -14,7 +14,7 @@ class ContentDashboardPage:
         "Syllabus": ["Board", "Grade", "Medium", "Stream", "Course", "Batch", "Discount"],
         "Content": [
             "Exams", "Exam Question Set", "Question Set", "Files", "Videos", "Banner",
-            "Report Questions", "Question Review", "Content Overview", "Faculty Review",
+            "Status", "Report Questions", "Question Review", "Content Overview", "Faculty Review",
             "Bulk Upload Task", "Stickers",
         ],
         "Schedule": ["Zoom Meets", "Youtube live", "Notice", "Study Type"],
