@@ -23,7 +23,7 @@ def load_env_file(path: Path) -> None:
 
 load_env_file(Path(__file__).parent / ".env")
 
-# This project runs HEADLESS ONLY. There is intentionally no option to run headed.
+# False = the browser window is shown while tests run; True = headless (no window).
 HEADLESS = True
 
 expect.set_options(timeout=10_000)

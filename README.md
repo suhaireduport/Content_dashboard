@@ -1,6 +1,7 @@
 # Staff Dashboard – Login Automation
 
-Python + Playwright + Pytest (Page Object Model). Tests run in **headless mode only**.
+Python + Playwright + Pytest (Page Object Model). Headless or headed is set by `HEADLESS`
+in [conftest.py](conftest.py) (`False` = browser window shown, `True` = headless).
 
 ## Channel (base URL)
 

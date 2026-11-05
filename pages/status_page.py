@@ -10,6 +10,7 @@ shown under each field, and the result is a toast. Course, Batch and Link picker
 custom search-select widget (see SearchSelect).
 """
 
+import base64
 import re
 from urllib.parse import urlencode
 
@@ -57,8 +58,30 @@ class StatusPage:
         self.heading = page.get_by_role("heading", name="STATUS", level=1)
         self.limits_note = self.heading.locator("xpath=following-sibling::div")
         self.add_button = page.get_by_role("button", name=re.compile(r"^\W*Add$"))
-        self.cards = page.locator("#st-results [data-post]")
+        self.cards = page.locator("#st-results [data-post]")  # grid cards or list-view rows
         self.toasts = page.locator("#st-toasts .st-toast")
+
+        # Toolbar: search, filters, grouping and view. Each change reloads #st-results over AJAX
+        # and puts the choices in the page URL.
+        self.filter_form = page.locator("#st-filter-form")
+        self.search_input = self.filter_form.locator("input[name=q]")
+        self.type_filter = self.filter_form.locator("select[name=type]")
+        self.state_filter = self.filter_form.locator("select[name=state]")
+        self.course_filter = SearchSelect(page.locator("#st-course-filter"))
+        self.group_select = self.filter_form.locator("select[name=group]")
+        self.reset_button = self.filter_form.locator("#st-reset")
+        self.grid_view_button = self.filter_form.locator("[data-view=grid]")
+        self.list_view_button = self.filter_form.locator("[data-view=list]")
+
+        # Results
+        self.results = page.locator("#st-results")
+        self.results_meta = self.results.locator("#st-results-meta")  # data-count = total matches
+        self.empty_results = self.results.get_by_text("No status found.", exact=True)
+        self.group_titles = self.results.locator(".st-group-title")
+        self.list_table = self.results.locator("table")
+        self.list_headers = self.list_table.locator("thead th")
+        self.pager_summary = self.results.locator(".st-pager > .st-muted")
+        self.pager_links = self.results.locator(".st-pager a.page-link")
 
         # Create / Edit popup (no accessible name, and its labels are not linked to inputs)
         self.dialog = page.locator("#statusModal")
@@ -69,7 +92,10 @@ class StatusPage:
         self.video_preview_meta = self.dialog.locator("#st-video-preview .pv-meta")
         self.video_warning = self.dialog.locator("#st-video-warn")
         self.image_input = self.dialog.locator("#st-images")
+        self.image_drop_zone = self.dialog.locator("#st-drop")
         self.image_previews = self.dialog.locator("#st-images-preview .pv-item")
+        self.image_positions = self.image_previews.locator(".pv-pos")
+        self.image_hint = self.dialog.locator("#st-images-hint")
         self.image_warning = self.dialog.locator("#st-images-warn")
         self.course_picker = SearchSelect(self.dialog.locator("#st-course-ss"))
         self.course_hint = self.dialog.locator("#st-course-hint")
@@ -80,6 +106,15 @@ class StatusPage:
         self.caption_input = self.dialog.locator("#st-caption")
         self.replace_oldest_checkbox = self.dialog.locator("#st-replace")
         self.save_button = self.dialog.locator("#st-submit")
+
+        # Image editor (crop / resize), opened from a preview's "✎ Edit" / "✎ Fix / crop"
+        self.image_editor = self.dialog.locator("#st-editor")
+        self.editor_file_name = self.image_editor.locator("#st-ed-name")
+        self.editor_active_ratio = self.image_editor.locator("#st-ed-ratios button.active")
+        self.editor_width_select = self.image_editor.locator("#st-ed-size")
+        self.editor_output = self.image_editor.locator("#st-ed-dims")
+        self.editor_apply_button = self.image_editor.locator("#st-ed-apply")
+        self.editor_cancel_button = self.image_editor.locator("#st-ed-cancel")
 
     # ---------- Locators for a specific field / status ----------
 
@@ -116,18 +151,36 @@ class StatusPage:
         """Course(s), batches and "→ <link>" line of a card."""
         return self.card(status_id).locator(".st-muted").filter(has=self.page.locator("b"))
 
-    def image_preview_shows_whole_image(self, index: int) -> bool:
-        """False when the preview frame cuts part of the image off (object-fit: cover on a
-        frame whose aspect ratio differs from the image's)."""
-        return self.image_previews.nth(index).locator("img").evaluate(
-            """async img => {
-                if (!img.complete) await new Promise(resolve => { img.onload = resolve; });
-                const fit = getComputedStyle(img).objectFit;
-                if (fit === 'contain' || fit === 'scale-down') return true;
-                const image = img.naturalWidth / img.naturalHeight, frame = img.clientWidth / img.clientHeight;
-                return Math.abs(image - frame) <= image * 0.01;
-            }"""
+    def image_preview_frame(self, index: int) -> Locator:
+        """Phone mockup the image is previewed in, as in the app: a 9:19.5 screen the image
+        fills (object-fit: cover), with shaded bands where the app's header/footer cover it."""
+        return self.image_previews.nth(index).locator(".pv-frame")
+
+    def image_preview_edit_button(self, index: int) -> Locator:
+        """Opens the crop editor: "✎ Edit", or "✎ Fix / crop" for a non-9:16 image."""
+        return self.image_previews.nth(index).locator("[data-a=edit]")
+
+    def image_preview_natural_size(self, index: int) -> tuple[int, int]:
+        """Pixel size of the image file shown in the preview (the file that will be uploaded)."""
+        return tuple(
+            self.image_preview_frame(index).locator("img").evaluate(
+                """async img => {
+                    if (!img.complete) await new Promise(resolve => { img.onload = resolve; });
+                    return [img.naturalWidth, img.naturalHeight];
+                }"""
+            )
         )
+
+    def result_count(self) -> int:
+        """Total number of statuses matching the current search / filters (all pages)."""
+        return int(self.results_meta.get_attribute("data-count"))
+
+    def shown_status_ids(self) -> list[str]:
+        return [row.get_attribute("data-post") for row in self.cards.all()]
+
+    def image_preview_control(self, index: int, action: str) -> Locator:
+        """Buttons under a preview: "left" (◀), "right" (▶), "del" (✕), "edit" (✎)."""
+        return self.image_previews.nth(index).locator(f"[data-a={action}]")
 
     # ---------- Actions ----------
 
@@ -137,6 +190,50 @@ class StatusPage:
         self.page.goto(
             self.URL + (f"?{urlencode(params)}" if params else ""), wait_until="domcontentloaded"
         )
+
+    def _reload_results(self, action) -> None:
+        """Run a toolbar action and wait until the list it triggers has been loaded."""
+        with self.page.expect_response(
+            lambda response: response.url.startswith(self.URL) and response.request.method == "GET",
+            timeout=self.SAVE_TIMEOUT,
+        ):
+            action()
+        self.results.and_(self.page.locator(":not(.st-loading)")).wait_for()
+
+    def search(self, text: str) -> None:
+        self._reload_results(lambda: self.search_input.fill(text))
+
+    def filter_by_type(self, post_type: str) -> None:
+        """"Edureel", "Edusnap", "Edusnap set", or "" for All types."""
+        self._reload_results(lambda: self.type_filter.select_option(self.TYPES.get(post_type, "")))
+
+    def filter_by_state(self, state: str) -> None:
+        """"Live", "Disabled", "Expired" or "Any status"."""
+        self._reload_results(lambda: self.state_filter.select_option(label=state))
+
+    def filter_by_course(self, name: str) -> None:
+        self._reload_results(lambda: self.course_filter.pick(name, search=name))
+
+    def group_by(self, grouping: str) -> None:
+        """"No grouping", "Group by month" or "Group by week"."""
+        self._reload_results(lambda: self.group_select.select_option(label=grouping))
+
+    def reset_filters(self) -> None:
+        self._reload_results(self.reset_button.click)
+
+    def switch_to_list_view(self) -> None:
+        self._reload_results(self.list_view_button.click)
+
+    def switch_to_grid_view(self) -> None:
+        self._reload_results(self.grid_view_button.click)
+
+    def open_page_number(self, number: int) -> None:
+        self._reload_results(self.pager_links.filter(has_text=re.compile(rf"^{number}$")).click)
+
+    def disable_status(self, status_id: str) -> None:
+        """Click a card's "Disable" button (takes a live status off the app)."""
+        with self.page.expect_response(lambda response: f"/content/status/toggle/{status_id}" in response.url):
+            self.card(status_id).get_by_role("button", name="Disable").click()
 
     def open_add_popup(self) -> None:
         self.add_button.click()
@@ -154,6 +251,58 @@ class StatusPage:
     def add_images(self, files: list[dict]) -> None:
         """`files` are Playwright file payloads: {"name", "mimeType", "buffer"}."""
         self.image_input.set_input_files(files)
+
+    def drop_images(self, files: list[dict]) -> None:
+        """Drag-and-drop `files` (Playwright file payloads) onto the image drop zone."""
+        payloads = [
+            {"name": f["name"], "mimeType": f["mimeType"], "data": base64.b64encode(f["buffer"]).decode()}
+            for f in files
+        ]
+        self.image_drop_zone.evaluate(
+            """(zone, files) => {
+                const data = new DataTransfer();
+                for (const f of files) {
+                    const bytes = Uint8Array.from(atob(f.data), c => c.charCodeAt(0));
+                    data.items.add(new File([bytes], f.name, { type: f.mimeType }));
+                }
+                zone.dispatchEvent(new DragEvent('drop', { dataTransfer: data, bubbles: true, cancelable: true }));
+            }""",
+            payloads,
+        )
+
+    def remove_image(self, index: int) -> None:
+        self.image_preview_control(index, "del").click()
+
+    def move_image_later(self, index: int) -> None:
+        self.image_preview_control(index, "right").click()
+
+    def set_image_position(self, index: int, position: int) -> None:
+        """Type a new position (1-based) into a preview's position box."""
+        box = self.image_previews.nth(index).locator(".pv-ctrl input")
+        box.fill(str(position))
+        # Leaving the box fires "change" once, as for a user (dispatching it as well moves twice)
+        box.press("Tab")
+
+    def open_image_editor(self, index: int) -> None:
+        self.image_preview_control(index, "edit").click()
+        # Cropper.js is loaded on first use; the output size shows once it is ready
+        self.editor_output.filter(has_text="Output").wait_for()
+
+    def choose_crop_ratio(self, ratio: str) -> None:
+        """"9:16", "9:19.5", "4:5", "1:1" or "Free"."""
+        self.image_editor.locator("#st-ed-ratios").get_by_role("button", name=ratio, exact=True).click()
+
+    def choose_output_width(self, width: str) -> None:
+        """"1080", "720", "1440" or "orig"."""
+        self.editor_width_select.select_option(width)
+
+    def apply_crop(self) -> None:
+        self.editor_apply_button.click()
+        self.image_editor.wait_for(state="hidden")
+
+    def cancel_crop(self) -> None:
+        self.editor_cancel_button.click()
+        self.image_editor.wait_for(state="hidden")
 
     def select_course(self, name: str) -> None:
         self.course_picker.pick(name, search=name)
@@ -173,6 +322,13 @@ class StatusPage:
 
     def fill_caption(self, caption: str) -> None:
         self.caption_input.fill(caption)
+
+    def open_edit_popup(self, status_id: str) -> None:
+        """Open a card's Edit popup and wait until the saved status is loaded into it."""
+        self.card(status_id).locator(".status-edit").click()
+        # The title changes once the status is fetched; links/batches finish loading after it
+        self.dialog_title.filter(has_text="Edit Status").wait_for()
+        self.page.locator("#status-form:not(.is-loading)").wait_for()
 
     def save(self) -> None:
         """Click Save and wait for the result. Valid forms disable Save while the request runs;

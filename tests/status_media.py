@@ -1,6 +1,7 @@
 """Test media for the Status tests, generated at run time (no binary files in the repo).
 
-- Images: solid-colour PNGs of any size, written with the standard library.
+- Images: solid-colour PNGs of any size, written with the standard library (JPEG / WebP
+  are encoded by the browser, as there is no imaging library in the project).
 - Videos: a WebM with one VP8 frame (encoded by the browser's WebCodecs VideoEncoder) and
   a Duration header, so the Status preview reports exactly the width, height and length
   asked for. Videos are served to the browser through page.route() from a fake URL; the
@@ -34,6 +35,36 @@ def png(width: int, height: int, name: str = "image.png") -> dict:
 def png_size(data: bytes) -> tuple[int, int]:
     """(width, height) from a PNG's IHDR chunk."""
     return struct.unpack(">II", data[16:24])
+
+
+def browser_image(page: Page, width: int, height: int, mime_type: str, name: str) -> dict:
+    """Playwright file payload for a solid-colour image encoded by the browser
+    ("image/jpeg", "image/webp", ...)."""
+    data = page.evaluate(
+        """async ([width, height, type]) => {
+            const canvas = new OffscreenCanvas(width, height), ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#405189'; ctx.fillRect(0, 0, width, height);
+            const blob = await canvas.convertToBlob({ type, quality: 0.9 });
+            return Array.from(new Uint8Array(await blob.arrayBuffer()));
+        }""",
+        [width, height, mime_type],
+    )
+    return {"name": name, "mimeType": mime_type, "buffer": bytes(data)}
+
+
+def image_size_at(page: Page, url: str) -> tuple[int, int]:
+    """(width, height) of an image URL in any format the browser decodes."""
+    return tuple(
+        page.evaluate(
+            """url => new Promise((resolve, reject) => {
+                const img = new Image();
+                img.onload = () => resolve([img.naturalWidth, img.naturalHeight]);
+                img.onerror = () => reject(new Error('Could not load ' + url));
+                img.src = url;
+            })""",
+            url,
+        )
+    )
 
 
 _ENCODE_FRAME_JS = """async ([width, height]) => {
