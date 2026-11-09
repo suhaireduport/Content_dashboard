@@ -44,4 +44,16 @@ $env:STAFF_PASSWORD="your_password"
 ```bash
 pytest -s tests/test_login.py
 ```
+
+## HTML report
+
+Every run writes a single, self-contained HTML report (pytest-html, configured in
+[pytest.ini](pytest.ini)) to `reports/report.html`. It is overwritten on each run.
+
+```bash
+open reports/report.html          # macOS
+start reports\report.html         # Windows
+```
+
+Allure still works alongside it: `pytest --alluredir=allure-results`.
 # Content_dashboard
