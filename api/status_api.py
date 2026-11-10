@@ -1,9 +1,12 @@
 """HTTP client for the Status endpoints used by the Status page (/content/status/list).
 
 Endpoints, as called by the page's own script (all need the X-Requested-With header):
-  GET  /content/status/list?q=<text>                 -> list fragment (HTML cards, data-post=<id>)
-  GET  /content/status/detail/<id>                   -> {"post_type", "title", "caption", "video_url",
-                                                         "images", "placements": [{"course", "link",
+  GET  /content/status/list?q=&type=&state=&course=  -> list fragment (HTML cards, data-post=<id>;
+                                                         #st-results-meta data-count = total matches)
+  GET  /content/status/detail/<id>                   -> {"id", "post_type", "title", "caption",
+                                                         "video_url", "state", "publish_at",
+                                                         "is_available", "images", "placements":
+                                                         [{"course", "course_title", "link",
                                                          "batches"}], ...}
   GET  /content/status/course-search?q=<text>        -> {"courses": [{"value", "label", "hint"}]}
   GET  /content/status/link-options?course=<id>      -> {"options": [{"id", "label", "level", "deep_link"}]}
@@ -41,6 +44,15 @@ class StatusApi:
             self.LIST_URL, params={"q": text}, headers=self.HEADERS, timeout=self.TIMEOUT
         ).text()
         return list(dict.fromkeys(re.findall(r'data-post="(\d+)"', fragment)))
+
+    def count(self, **filters: str) -> int:
+        """Number of statuses matching the Status list filters (all pages), from the list
+        fragment's data-count. Filters: q, type ("1"-"3"), state (live, scheduled, disabled,
+        expired), course (id)."""
+        fragment = self.request.get(
+            self.LIST_URL, params=filters, headers=self.HEADERS, timeout=self.TIMEOUT
+        ).text()
+        return int(re.search(r'id="st-results-meta" data-count="(\d+)"', fragment).group(1))
 
     def course_hint(self, course_name: str) -> str:
         """Live count shown next to the course in the Course picker, e.g. "3/3 live"."""

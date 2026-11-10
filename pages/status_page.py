@@ -1,9 +1,9 @@
 """Page Object for the Content Dashboard > Status page (/content/status/list).
 
 Statuses are Edureels (a video URL), Edusnaps (1 image) or Edusnap sets (2-3 images),
-posted to one or more courses (or to batches of one course). Each course needs a link
-choice: a chapter / topic / sub-topic, or "No link". A course holds at most 3 live
-statuses; a status is live for 24h after publishing.
+posted to one or more courses (or to batches of one course). Each course can link to a
+chapter / topic / sub-topic; the default is "No link". A course holds at most 3 live
+statuses; a status is live for 24h from its publish date and time.
 
 The Create / Edit popup is filled by the page's script and saved over AJAX: errors are
 shown under each field, and the result is a toast. Course, Batch and Link pickers are a
@@ -12,6 +12,7 @@ custom search-select widget (see SearchSelect).
 
 import base64
 import re
+import time
 from urllib.parse import urlencode
 
 from playwright.sync_api import Locator, Page
@@ -49,7 +50,8 @@ class StatusPage:
 
     TYPES = {"Edureel": "1", "Edusnap": "2", "Edusnap set": "3"}
     AUDIENCES = {"Course": "1", "Batch": "2"}
-    NO_LINK = "No link in this course (no footer)"
+    NO_LINK = "No link"  # every course's default link choice
+    LINK_OPTIONS_TIMEOUT = 30_000
 
     def __init__(self, page: Page):
         self.page = page
@@ -58,8 +60,10 @@ class StatusPage:
         self.heading = page.get_by_role("heading", name="STATUS", level=1)
         self.limits_note = self.heading.locator("xpath=following-sibling::div")
         self.add_button = page.get_by_role("button", name=re.compile(r"^\W*Add$"))
+        self.analytics_link = page.get_by_role("link", name=re.compile(r"^\W*Analytics$"))
         self.cards = page.locator("#st-results [data-post]")  # grid cards or list-view rows
-        self.toasts = page.locator("#st-toasts .st-toast")
+        # ".out" = a toast fading out (an earlier message), so it is not matched
+        self.toasts = page.locator("#st-toasts .st-toast:not(.out)")
 
         # Toolbar: search, filters, grouping and view. Each change reloads #st-results over AJAX
         # and puts the choices in the page URL.
@@ -86,6 +90,7 @@ class StatusPage:
         # Create / Edit popup (no accessible name, and its labels are not linked to inputs)
         self.dialog = page.locator("#statusModal")
         self.dialog_title = self.dialog.locator("#status-modal-title")
+        self.publish_at_input = self.dialog.locator("#st-publish-at")  # datetime-local, defaults to now
         self.type_select = self.dialog.locator("#st-type")
         self.audience_select = self.dialog.locator("#st-audience")
         self.video_url_input = self.dialog.locator("#st-video-url")
@@ -313,9 +318,18 @@ class StatusPage:
 
     def choose_link(self, course_id: str, label: str) -> None:
         picker = self.link_picker(course_id)
-        # The row shows "Loading…" until the course's link options arrive
-        picker.input.and_(self.page.locator(":not([placeholder='Loading…'])")).wait_for()
-        picker.pick(label)
+        option = picker.option(label)
+        # The course's link options are fetched after the course is picked, with no loading
+        # state shown, and an open menu is not redrawn when they arrive. An "input" event
+        # redraws the menu from the options loaded so far, so redraw until the option shows.
+        picker.input.click()
+        deadline = time.monotonic() + self.LINK_OPTIONS_TIMEOUT / 1000
+        while not option.is_visible():
+            if time.monotonic() > deadline:
+                raise TimeoutError(f'Link option "{label}" not shown for course {course_id}')
+            picker.input.dispatch_event("input")
+            self.page.wait_for_timeout(250)
+        option.click()
 
     def fill_title(self, title: str) -> None:
         self.title_input.fill(title)
@@ -352,10 +366,14 @@ class StatusPage:
         title: str = "",
         caption: str = "",
         replace_oldest: bool = False,
+        publish_at: str | None = None,
     ) -> None:
         """Open the Create popup and fill it. `courses` is {course id: name}; `links` is
-        {course id: link label} and defaults to "No link" for every course ({} = no choice)."""
+        {course id: link label}. A course left out of `links` keeps the default, "No link".
+        `publish_at` ("YYYY-MM-DDTHH:MM", local time) defaults to now; a later time schedules it."""
         self.open_add_popup()
+        if publish_at is not None:
+            self.publish_at_input.fill(publish_at)
         self.choose_type(post_type)
         self.choose_audience(audience)
         if video_url is not None:
@@ -366,9 +384,7 @@ class StatusPage:
             self.select_course(name)
         for name in batches:
             self.select_batch(name)
-        if links is None:
-            links = {course_id: self.NO_LINK for course_id in courses}
-        for course_id, label in links.items():
+        for course_id, label in (links or {}).items():
             self.choose_link(course_id, label)
         self.fill_title(title)
         self.fill_caption(caption)

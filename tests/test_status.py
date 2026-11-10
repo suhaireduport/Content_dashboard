@@ -26,11 +26,8 @@ from playwright.sync_api import expect
 from api.status_api import StatusApi
 from pages.course_page import CoursePage
 from pages.status_page import StatusPage
-from tests.data import COURSE_DATA
+from tests.data import COURSE_DATA, STATUS_PREFIX
 from tests.status_media import browser_image, image_size_at, png, png_size, serve_video
-
-# Every status created by automation has a title (or caption) starting with this
-STATUS_PREFIX = "atmn"
 
 # Generated test media: (width, height, seconds)
 VERTICAL_15S = (360, 640, 15)
@@ -135,7 +132,7 @@ def test_status_tab_is_visible(content_dashboard):
     expect(status_page.page).to_have_url(StatusPage.URL_PATTERN)
     expect(status_page.heading).to_be_visible()
     expect(status_page.limits_note).to_have_text(
-        "Max 3 active per course · live for 24h after publishing / re-enabling"
+        "Max 3 active per course · live for 24h from its publish date / re-enabling"
     )
     expect(status_page.add_button).to_be_visible()
 
@@ -624,7 +621,7 @@ def test_fourth_live_status_replaces_oldest(status_page, qa_course, status_api, 
     status_page.save()
 
     expect(status_page.field_error("course")).to_contain_text(
-        f'"{course_name}" already has 3 active status (limit 3).'
+        f'"{course_name}" already has 3 active status (limit 3) around that time. Oldest is #{oldest},'
     )
     expect(status_page.toast(StatusPage.COURSE_FULL_MESSAGE)).to_be_visible()
     expect_rejected(status_page, status_api, f"{status_title} 4")
@@ -670,13 +667,12 @@ def test_post_to_batch_needs_one_course_and_a_batch(status_page, qa_course, seco
     expect(status_page.course_hint).to_have_text("exactly one")
 
     # Picking a second course replaces the first
-    [first_name], [(second_id, second_name)] = qa_course.values(), second_course.items()
+    [first_name], [second_name] = qa_course.values(), second_course.values()
     status_page.select_course(first_name)
     status_page.select_course(second_name)
     expect(status_page.course_picker.chips).to_have_text([second_name])
 
     status_page.enter_video_url(video(*VERTICAL_15S))
-    status_page.choose_link(second_id, StatusPage.NO_LINK)
     status_page.fill_title(status_title)
     status_page.save()
 
@@ -715,7 +711,8 @@ def test_publish_status_with_course_link(status_page, qa_course, qa_tree, status
     """STATUS_010: the chosen chapter / topic / subtopic link is saved and shown on the card."""
     [course_id] = qa_course
     label = " › ".join(qa_tree[name]["name"] for name in LINK_LEVELS[: LINK_LEVELS.index(level) + 1])
-    option = next(option for option in status_api.link_options(course_id) if option["level"] == level)
+    # Picked by id: the course can also list other subjects' chapters / topics / subtopics
+    option = next(option for option in status_api.link_options(course_id) if str(option["id"]) == qa_tree[level]["id"])
 
     status_page.fill_status(
         "Edureel", qa_course, video_url=video(*VERTICAL_15S), links={course_id: label}, title=status_title
@@ -736,23 +733,22 @@ def test_publish_status_with_course_link(status_page, qa_course, qa_tree, status
     )
 
 
-def test_publish_requires_link_choice(status_page, qa_course, status_api, status_title, video):
-    """STATUS_011: Save is refused until a link (or "No link") is chosen for the course."""
+def test_course_link_is_optional(status_page, qa_course, status_api, status_title, video):
+    """STATUS_011: the link is optional; a course defaults to "No link" and saves without a choice."""
     [course_id] = qa_course
-    status_page.fill_status("Edureel", qa_course, video_url=video(*VERTICAL_15S), links={}, title=status_title)
-    expect(status_page.link_row(course_id)).to_be_visible()
+    status_page.fill_status("Edureel", qa_course, video_url=video(*VERTICAL_15S), title=status_title)
 
-    status_page.save()
+    expect(status_page.link_picker(course_id).chips).to_have_text([StatusPage.NO_LINK])
+    expect(status_page.deep_link_preview(course_id)).to_be_hidden()
 
-    expect(status_page.field_error(f"link_{course_id}")).to_have_text('Choose a link, or "No link".')
-    expect_rejected(status_page, status_api, status_title)
-
-    status_page.choose_link(course_id, StatusPage.NO_LINK)
-    expect(status_page.field_error(f"link_{course_id}")).to_be_empty()
     status_page.save()
 
     expect_saved(status_page)
-    assert len(status_api.ids_matching(status_title)) == 1
+    [status_id] = status_api.ids_matching(status_title)
+    [placement] = status_api.detail(status_id)["placements"]
+    assert not placement["link"]
+    status_page.open(status_title)
+    expect(status_page.card_placement(status_id)).to_contain_text("→ no link")
 
 
 # ---------- STATUS_012: optional title and caption ----------

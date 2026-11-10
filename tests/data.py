@@ -9,3 +9,7 @@ COURSE_DATA = {
     "medium": "ENGLISH",
     "stream": "SCIENCE",
 }
+
+# Every status created by automation has a title (or caption) starting with this, so it can
+# be told apart from manually added statuses
+STATUS_PREFIX = "atmn"
