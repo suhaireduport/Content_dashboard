@@ -9,7 +9,8 @@ class SubjectPage(SyllabusLevelPage):
     LEVEL = "Subject"
     PATH = "subject"
     CHILD_LINK = "Chapters"
-    CREATE_REQUIRED_FIELDS = ("title", "short_title", "phone", "core_type", "asset")
+    # Mentor Phone ("phone") is optional: "leave blank if the subject has no mentor"
+    CREATE_REQUIRED_FIELDS = ("title", "short_title", "core_type", "asset")
     CREATE_HAS_AVAILABILITY = False
     MENU_ITEMS = ("Change Log", "Duplicate", "Edit", "Delete")
 

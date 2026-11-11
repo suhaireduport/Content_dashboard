@@ -9,7 +9,9 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # A push to main waits for the running suite instead of cancelling it;
+  # a new commit on a pull request still replaces that PR's older run
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   tests:
@@ -42,12 +44,15 @@ jobs:
           # The server works in India time; the Status page fills "Publish date and time"
           # from the browser clock, and a UTC clock makes every new status "in the past".
           TZ: Asia/Kolkata
-        run: pytest
+        # Rewrite the HTML report after every test, so a cancelled or timed-out
+        # run still uploads the results it reached
+        run: pytest -o generate_report_on_test=true
 
       - name: Upload HTML report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-html-report
+          name: pytest-html-report-attempt-${{ github.run_attempt }}
           path: reports/report.html
+          if-no-files-found: warn
           retention-days: 14
