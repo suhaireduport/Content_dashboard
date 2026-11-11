@@ -78,7 +78,12 @@ class CourseApi:
         if not row:
             return []
         names = re.findall(r'class="card-body[^"]*">\s*(.*?)\s*<button', row.group(0), re.S)
-        return [" ".join(name.replace("&nbsp;", " ").split()) for name in names]
+        # Names are shown as "Name (employee code)" where the mentor has one, e.g.
+        # "ABEEA FATHIMA S (EP2787)"; the code is dropped to match the mentor-list name
+        return [
+            re.sub(r"\s*\([A-Z]+\d+\)$", "", " ".join(name.replace("&nbsp;", " ").split()))
+            for name in names
+        ]
 
     def edit_form_values(self, course_id: str) -> dict:
         """Values the server pre-fills in the Edit form: text/select labels and checkbox states."""

@@ -36,8 +36,10 @@ def admin_page(browser):
         pytest.skip("STAFF_USERNAME / STAFF_PASSWORD environment variables are not set")
     context = browser.new_context()
     page = context.new_page()
-    # The dev server occasionally takes >30s to reload a list after Save/Delete
+    # The dev server occasionally takes >30s to reload a list after Save/Delete. A click that
+    # submits a form also waits for that navigation, so actions get the same limit.
     page.set_default_navigation_timeout(60_000)
+    page.set_default_timeout(60_000)
     login_page = LoginPage(page)
     login_page.open()
     login_page.login(username, password)

@@ -39,6 +39,9 @@ jobs:
         env:
           STAFF_USERNAME: ${{ secrets.STAFF_USERNAME }}
           STAFF_PASSWORD: ${{ secrets.STAFF_PASSWORD }}
+          # The server works in India time; the Status page fills "Publish date and time"
+          # from the browser clock, and a UTC clock makes every new status "in the past".
+          TZ: Asia/Kolkata
         run: pytest
 
       - name: Upload HTML report

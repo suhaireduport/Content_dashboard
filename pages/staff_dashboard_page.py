@@ -42,4 +42,7 @@ class MentorPoolPage:
 
     def mentor_names(self, course_id: str) -> list[str]:
         texts = self.course_row(course_id).locator(".card-body").all_text_contents()
-        return [re.sub(r"[^\w\s.-]+$", "", " ".join(text.split())).strip() for text in texts]
+        names = [re.sub(r"[^\w\s.-]+$", "", " ".join(text.split())).strip() for text in texts]
+        # The pool shows "Name (employee code)", e.g. "ABEEA FATHIMA S (EP2787)"; the Course
+        # form's mentor dropdown and /core/get/mentor-list show only the name
+        return [re.sub(r"\s*\([A-Z]+\d+\)$", "", name) for name in names]

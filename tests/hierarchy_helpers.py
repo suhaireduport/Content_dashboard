@@ -394,8 +394,10 @@ def check_duplicate_creates_copy(level_page, api: SyllabusApi, qa_tree: dict, sh
 
 
 def check_unknown_id_has_no_server_error(api: SyllabusApi, level: str) -> None:
-    edit_form = api.get_edit_form(level, UNKNOWN_ID)
-    list_page = api.get_list_page(level, UNKNOWN_ID)
-
-    assert edit_form.status < 500, f"Edit form for unknown {level} id returned HTTP {edit_form.status}"
-    assert list_page.status < 500, f"{level} list for unknown parent id returned HTTP {list_page.status}"
+    # Both are checked before failing, so the report shows every URL that errors
+    statuses = {
+        "Edit form": api.get_edit_form(level, UNKNOWN_ID).status,
+        "List page": api.get_list_page(level, UNKNOWN_ID).status,
+    }
+    errors = {name: status for name, status in statuses.items() if status >= 500}
+    assert errors == {}, f"Unknown {level} id returned server errors (HTTP): {errors}"

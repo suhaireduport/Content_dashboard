@@ -147,6 +147,8 @@ def test_add_non_active_course_appears_in_archived_and_all(course_page, test_cou
     course_page.create_course(test_course_name, **COURSE_DATA, is_active=False)
 
     expect(course_page.success_alert).to_contain_text(CoursePage.CREATED_MESSAGE)
+    # Archived cards are loaded on the first Archived / All visit, not with the page
+    course_page.load_all_courses()
     card = course_page.course_card(test_course_name)
     expect(card).to_have_count(1)
     expect(card).to_have_attribute("data-active", "false")
@@ -241,6 +243,8 @@ def test_course_list_endpoint_returns_html(course_api):
 def test_api_courses_match_ui_cards_and_tab_counts(course_page, course_api):
     api_courses = course_api.list_courses()
     api_statuses = {course["id"]: course["active"] for course in api_courses}
+    # Archived cards are loaded on the first Archived / All visit, not with the page
+    course_page.load_all_courses()
 
     assert api_statuses == course_page.card_statuses()
 
