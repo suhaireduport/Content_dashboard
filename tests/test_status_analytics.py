@@ -13,8 +13,6 @@ The channel is shared: a status added or removed by someone else while this runs
 the counts.
 
 Observed behaviour (see report):
-- The date under a post in "Latest 50 posts" is when it was created, not its publish date:
-  a status scheduled 2 days ahead shows today's date (STATUS_ANALYTICS_006 [later]).
 - The Views / Likes cards are higher than the sum of the posts' values (e.g. 45 views for
   2 posts with 3 + 2 views), as if deleted statuses still count (STATUS_ANALYTICS_008).
 """
@@ -45,7 +43,7 @@ POSTS = {"reel": "live", "snap": "live", "off": "disabled", "later": "scheduled"
 EXPECTED_CHANGE = {
     "All posts": 4, "Live now": 2, "Disabled": 1, "Expired": 0,
     "Views": 0, "Watched fully": 0, "Likes": 0,
-    "Edureel": 2, "Edusnap": 1, "Edusnap set": 1,
+    "Edureel": 2, "Edusnap": 1, "Edusnap set": 1, "EduPoll": 0,
 }
 
 
@@ -65,7 +63,7 @@ def analytics(admin_page):
 def analytics_statuses(admin_page, status_api):
     """A test-only course with 4 statuses: a live Edureel, a live Edusnap, a disabled Edureel
     and an Edusnap set scheduled 2 days ahead (so its 24h never overlaps the others' and the
-    course stays under 3 live). The analytics summary is read before and after adding them.
+    course stays under 5 live). The analytics summary is read before and after adding them.
     Statuses and course are deleted after the module."""
     tag = uuid4().hex[:8]
     course_name = f"QA Auto Course {tag} analytics"
@@ -134,7 +132,7 @@ def test_analytics_opens_from_status_list(admin_page):
     analytics = StatusAnalyticsPage(admin_page)
     expect(admin_page).to_have_url(StatusAnalyticsPage.URL_PATTERN)
     expect(analytics.heading).to_be_visible()
-    expect(analytics.note).to_have_text("Counts only. Max 3 live per course.")
+    expect(analytics.note).to_have_text("Counts only. Max 5 live per course.")
     expect(analytics.summary_labels).to_have_text(StatusAnalyticsPage.SUMMARY_LABELS)
     expect(analytics.course_headers).to_have_text(StatusAnalyticsPage.COURSE_HEADERS)
     expect(analytics.post_headers).to_have_text(StatusAnalyticsPage.POST_HEADERS)
@@ -158,11 +156,11 @@ def test_summary_counts_match_status_api(analytics, status_api):
 
 
 def test_summary_counts_add_up(analytics, status_api):
-    """STATUS_ANALYTICS_003: All posts = Edureel + Edusnap + Edusnap set, and = Live + Scheduled
+    """STATUS_ANALYTICS_003: All posts = Edureel + Edusnap + Edusnap set + EduPoll, and = Live + Scheduled
     + Disabled + Expired (Scheduled has no card; it is taken from the API)."""
     shown = analytics.summary()
 
-    assert shown["Edureel"] + shown["Edusnap"] + shown["Edusnap set"] == shown["All posts"]
+    assert sum(shown[name] for name in StatusPage.TYPES) == shown["All posts"]
     scheduled = status_api.count(state="scheduled")
     assert shown["Live now"] + scheduled + shown["Disabled"] + shown["Expired"] == shown["All posts"]
 
@@ -179,7 +177,7 @@ def test_new_statuses_are_counted(analytics_statuses):
 
 
 def test_course_row_matches_status_api(analytics, analytics_statuses, status_api):
-    """STATUS_ANALYTICS_005: the By course row of the test course shows its live count out of 3
+    """STATUS_ANALYTICS_005: the By course row of the test course shows its live count out of 5
     (as in the Course picker's hint), its number of posts (as the API's course filter) and no
     engagement yet."""
     course_name = analytics_statuses["course_name"]
@@ -200,18 +198,18 @@ def test_course_row_matches_status_api(analytics, analytics_statuses, status_api
 @pytest.mark.parametrize("name", list(POSTS))
 def test_post_row_matches_status_detail(analytics, analytics_statuses, status_api, name):
     """STATUS_ANALYTICS_006: a post's row shows the title, publish date, type and state returned
-    by the status detail API, and no engagement yet.
-
-    Observed: [later] fails. The row shows the date the scheduled post was created, not its
-    publish date (e.g. "10 Nov 2026, 11:22" for a post publishing on 12 Nov 2026, 11:21)."""
+    by the status detail API, and no engagement yet. The date reads "Publishes <date>" for a
+    scheduled post and "Published <date>" otherwise."""
     detail = status_api.detail(analytics_statuses["ids"][name])
     assert detail["state"] == POSTS[name]
 
     row = analytics.post_row(analytics_statuses["titles"][name])
 
+    verb = StatusAnalyticsPage.PUBLISHES if detail["state"] == "scheduled" else StatusAnalyticsPage.PUBLISHED
+    date = datetime.fromisoformat(detail["publish_at"]).strftime(StatusAnalyticsPage.DATE_FORMAT)
     assert row == {
         "title": detail["title"],
-        "published": datetime.fromisoformat(detail["publish_at"]).strftime(StatusAnalyticsPage.DATE_FORMAT),
+        "published": f"{verb} {date}",
         "type": TYPE_NAMES[detail["post_type"]],
         "state": STATE_NAMES[detail["state"]],
         "views": 0, "watched_fully": 0, "likes": 0,
@@ -225,7 +223,7 @@ def test_latest_posts_are_newest_first_and_at_most_50(analytics):
     rows = analytics.post_table_rows()
 
     assert len(rows) == min(StatusAnalyticsPage.LATEST_LIMIT, total)
-    dates = [datetime.strptime(row["published"], StatusAnalyticsPage.DATE_FORMAT) for row in rows]
+    dates = [StatusAnalyticsPage.published_at(row["published"]) for row in rows]
     assert dates == sorted(dates, reverse=True)
 
 

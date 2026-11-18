@@ -6,7 +6,8 @@ to tell them apart from manually added statuses. Videos and images are generated
 time (see tests/status_media.py).
 
 Observed behaviour (see report):
-- Video length is not checked: a vertical 75s Edureel is saved like a 15s one (STATUS_003).
+- Video length: a video over 60s is flagged in the preview ("⚠ over 60 s") and Save is
+  refused with an error under Video URL (STATUS_003; fixed on 18 Nov 2026, it used to save).
 - Orientation is advisory: a non-9:16 video or image shows a warning but can still be saved.
 - The image preview is a phone mockup (9:19.5 screen, filled as in the app, shaded
   header/footer bands), so edges outside the phone screen are masked in the preview only.
@@ -14,8 +15,15 @@ Observed behaviour (see report):
 - Crop editor: the 9:19.5 ratio produces a 1079×2340 image although the editor shows
   "Output 1080×2340" (other ratios match exactly). Accepted as cosmetic (not a bug), so the
   applied size is checked to within 1px.
-- When a course already has 3 live statuses, a 4th is refused unless "Replace oldest if
-  course is full" is ticked; the oldest is then disabled, not deleted.
+- When a course already has 5 live statuses, a 6th is refused unless "Replace oldest if
+  course is full" is ticked; the oldest is then disabled, not deleted. Every type, an EduPoll
+  or a 3-image set included, takes one slot.
+- EduPolls (Status v2): the build has a "Poll kind" choice (Quiz / Opinion) and an optional
+  image that the PRD does not mention, and no control to reorder options (PRD: reordering
+  relabels them), so reordering is not tested.
+- EduPoll image shape: the app shows a Quiz poll image at 16:10 and an Opinion poll image at
+  3:2. The dashboard uses 16:10 for both kinds (preview, warning, "Crop to app size"), so the
+  Opinion cases of the STATUS_022 (image) tests fail.
 """
 
 import re
@@ -98,6 +106,31 @@ def video(status_page):
         status_page.page.unroute(url)
 
 
+def poll(question: str, options: tuple[str, ...] = ("Momentum", "Force", "Energy", "Power"), correct: int | None = 1) -> dict:
+    """fill_status / create_status arguments for a Quiz EduPoll (b is correct by default)."""
+    return {"question": question, "options": list(options), "correct": correct}
+
+
+def create_polls(status_page: StatusPage, courses: dict[str, str], prefix: str, count: int) -> None:
+    """Post `count` EduPolls, oldest first: "<prefix> 1" ... "<prefix> <count>"."""
+    for number in range(1, count + 1):
+        status_page.create_status("EduPoll", courses, **poll(f"{prefix} {number}"))
+
+
+def wait_for_capacity(status_page: StatusPage, action) -> dict:
+    """Run a form action (e.g. picking a course), wait for the capacity check it triggers and
+    return its answer: {"max_live", "courses": [{"full", "replaces", ...}]}."""
+    with status_page.page.expect_response(lambda response: "/content/status/capacity" in response.url) as info:
+        action()
+    return info.value.json()
+
+
+def expect_nothing_saved(status_page: StatusPage, status_api: StatusApi, course_id: str) -> None:
+    """The popup stays open and the (test-only) course still has no status."""
+    expect(status_page.dialog).to_be_visible()
+    assert status_api.count(course=course_id) == 0
+
+
 def padded(image: dict, size: int) -> dict:
     """The same image file with trailing bytes added up to exactly `size` bytes (still decodable)."""
     return {**image, "buffer": image["buffer"] + bytes(size - len(image["buffer"]))}
@@ -116,7 +149,8 @@ def within_1px(pixels: str) -> str:
 
 
 def expect_saved(status_page: StatusPage) -> None:
-    expect(status_page.toast(StatusPage.SAVED_MESSAGE)).to_be_visible()
+    # Saves made in quick succession can leave an earlier "Status saved." toast on screen
+    expect(status_page.toast(StatusPage.SAVED_MESSAGE).last).to_be_visible()
     expect(status_page.dialog).to_be_hidden()
 
 
@@ -139,7 +173,7 @@ def test_status_tab_is_visible(content_dashboard):
     expect(status_page.page).to_have_url(StatusPage.URL_PATTERN)
     expect(status_page.heading).to_be_visible()
     expect(status_page.limits_note).to_have_text(
-        "Max 3 active per course · live for 24h from its publish date / re-enabling"
+        f"Max {StatusPage.LIVE_LIMIT} active per course · live for 24h from its publish date / re-enabling"
     )
     expect(status_page.add_button).to_be_visible()
 
@@ -165,11 +199,10 @@ def test_create_edureel_with_vertical_video_under_60_seconds(status_page, qa_cou
 
 
 def test_edureel_over_60_seconds_is_blocked(status_page, qa_course, status_api, status_title, video):
-    """STATUS_003: a video longer than 60s cannot be published and a validation message is shown.
-
-    Observed: fails. The preview reports 75s, but the status is saved and goes Live."""
+    """STATUS_003: a video longer than 60s is flagged in the preview ("⚠ over 60 s"), cannot be
+    published, and a validation message is shown."""
     status_page.fill_status("Edureel", qa_course, video_url=video(*VERTICAL_75S), title=status_title)
-    expect(status_page.video_preview_meta).to_have_text("360×640 · 9:16.0 · 75s ✓")
+    expect(status_page.video_preview_meta).to_have_text("360×640 · 9:16.0 · 75s ⚠ over 60 s")
 
     status_page.save()
 
@@ -615,38 +648,42 @@ def test_remove_image_from_saved_edusnap_set(status_page, qa_course, status_api,
     assert [image["id"] for image in status_api.detail(status_id)["images"]] == [first["id"], third["id"]]
 
 
-# ---------- STATUS_007: three live statuses per course ----------
+# ---------- STATUS_007: five live statuses per course ----------
 
 
-def test_fourth_live_status_replaces_oldest(status_page, qa_course, status_api, status_title, video):
-    """STATUS_007: with 3 live statuses in a course, a 4th is refused until "Replace oldest"
-    is ticked; then the oldest is taken off (Disabled) and the course stays at 3 live."""
+def test_sixth_live_status_replaces_oldest(status_page, qa_course, status_api, status_title, video):
+    """STATUS_007 (with STATUS_016-017): every type takes one slot, so a reel, a snap, a
+    3-image set and 2 polls fill a course (5/5 live). A 6th is refused until "Replace oldest"
+    is ticked; then the oldest is taken off (Disabled) and the course stays at 5 live."""
     [course_name] = qa_course.values()
-    url = video(*VERTICAL_15S)
-    for number in range(1, StatusPage.LIVE_LIMIT + 1):
-        status_page.create_status("Edureel", qa_course, video_url=url, title=f"{status_title} {number}")
-    assert status_api.course_hint(course_name) == "3/3 live"
+    status_page.create_status("Edureel", qa_course, video_url=video(*VERTICAL_15S), title=f"{status_title} 1")
+    status_page.create_status("Edusnap", qa_course, images=[png(1080, 1920)], title=f"{status_title} 2")
+    status_page.create_status("Edusnap set", qa_course, images=[png(1080, 1920)] * 3, title=f"{status_title} 3")
+    for number in (4, 5):
+        status_page.create_status("EduPoll", qa_course, **poll(f"{status_title} {number}"))
+    assert status_api.course_hint(course_name) == f"{StatusPage.LIVE_LIMIT}/{StatusPage.LIVE_LIMIT} live"
     [oldest] = status_api.ids_matching(f"{status_title} 1")
 
-    status_page.fill_status("Edureel", qa_course, video_url=url, title=f"{status_title} 4")
+    status_page.fill_status("EduPoll", qa_course, **poll(f"{status_title} 6"))
     status_page.save()
 
     expect(status_page.field_error("course")).to_contain_text(
-        f'"{course_name}" already has 3 active status (limit 3) around that time. Oldest is #{oldest},'
+        f'"{course_name}" already has 5 active status (limit 5) around that time. Oldest is #{oldest},'
     )
     expect(status_page.toast(StatusPage.COURSE_FULL_MESSAGE)).to_be_visible()
-    expect_rejected(status_page, status_api, f"{status_title} 4")
+    expect(status_page.dialog).to_be_visible()
+    assert len(status_api.ids_matching(course_name)) == StatusPage.LIVE_LIMIT
 
     status_page.replace_oldest_checkbox.check()
     status_page.save()
 
     expect_saved(status_page)
-    [newest] = status_api.ids_matching(f"{status_title} 4")
-    assert status_api.course_hint(course_name) == "3/3 live"
+    assert status_api.course_hint(course_name) == "5/5 live"
     assert status_api.detail(oldest)["is_available"] is False
-    status_page.open(status_title)
+    newest = status_api.ids_matching(course_name)[0]
+    status_page.open(course=next(iter(qa_course)))
     expect(status_page.card_badges(oldest)).to_have_text(["Edureel", "Disabled"])
-    expect(status_page.card_badges(newest)).to_have_text(["Edureel", "Live"])
+    expect(status_page.card_badges(newest)).to_have_text(["EduPoll", "Live"])
 
 
 # ---------- STATUS_008 - STATUS_009: audience ----------
@@ -788,6 +825,552 @@ def test_title_and_caption_are_optional(status_page, qa_course, status_api, stat
     expect(status_page.card_title(status_id)).to_have_text(title or NO_TITLE_TEXT)
 
 
+# ---------- STATUS_013 - STATUS_019: live limit of 5 (Status v2) ----------
+
+
+def test_course_hint_counts_live_out_of_5(status_page, qa_course, status_api, status_title):
+    """STATUS_013: the course picker shows the live count out of 5, e.g. "1/5 live"."""
+    [course_name] = qa_course.values()
+    assert status_api.course_hint(course_name) == "0/5 live"
+
+    status_page.create_status("EduPoll", qa_course, **poll(f"{status_title} 1"))
+
+    assert status_api.course_hint(course_name) == "1/5 live"
+
+
+def test_full_course_names_status_to_be_replaced(status_page, qa_course, status_api, status_title):
+    """STATUS_014 - STATUS_015: with 4 live statuses the form shows no capacity note and no
+    "Replace oldest" checkbox; at 5/5 it names the status a save would replace and shows the
+    checkbox. (Fails on the v2 build: the note gets the right text but stays hidden, because the
+    page's CSS has "#st-capacity-note { display: none; }" and showing it only clears the inline style.)"""
+    [course_name] = qa_course.values()
+    create_polls(status_page, qa_course, status_title, StatusPage.LIVE_LIMIT - 1)
+
+    status_page.open_add_popup()
+    wait_for_capacity(status_page, lambda: status_page.select_course(course_name))
+
+    expect(status_page.capacity_note).to_be_hidden()
+    expect(status_page.replace_oldest_checkbox).to_be_hidden()
+
+    status_page.open()
+    status_page.create_status("EduPoll", qa_course, **poll(f"{status_title} {StatusPage.LIVE_LIMIT}"))
+    status_page.open_add_popup()
+    wait_for_capacity(status_page, lambda: status_page.select_course(course_name))
+
+    expect(status_page.capacity_note).to_be_visible()
+    expect(status_page.capacity_note).to_contain_text(
+        f'{course_name} is full (5/5): will replace "{status_title} 1" (EduPoll, expires '
+    )
+    expect(status_page.replace_oldest_checkbox).to_be_visible()
+    expect(status_page.replace_oldest_checkbox).not_to_be_checked()
+
+
+def test_reenable_in_full_course_asks_before_replacing(status_page, qa_course, status_api, status_title):
+    """STATUS_018: re-enabling a disabled status in a full course asks first, like Save.
+    Cancel changes nothing; "Replace oldest" puts it live and disables the oldest live one."""
+    [course_id], [course_name] = qa_course, qa_course.values()
+    status_page.create_status("EduPoll", qa_course, **poll(f"{status_title} off"))
+    [disabled] = status_api.ids_matching(course_name)
+    status_page.open(course=course_id)
+    status_page.disable_status(disabled)
+    create_polls(status_page, qa_course, status_title, StatusPage.LIVE_LIMIT)
+    [oldest_live] = status_api.ids_matching(f"{status_title} 1")
+    assert status_api.course_hint(course_name) == "5/5 live"
+
+    status_page.open(course=course_id)
+    status_page.click_enable(disabled)
+
+    expect(status_page.confirm_dialog).to_be_visible()
+    expect(status_page.confirm_title).to_have_text("Course is full")
+    expect(status_page.confirm_body).to_contain_text("Replace the oldest live status?")
+
+    status_page.dismiss_confirm()
+
+    assert status_api.detail(disabled)["is_available"] is False
+    assert status_api.detail(oldest_live)["is_available"] is True
+
+    status_page.click_enable(disabled)
+    status_page.confirm()
+
+    assert status_api.detail(disabled)["is_available"] is True
+    assert status_api.detail(oldest_live)["is_available"] is False
+    assert status_api.course_hint(course_name) == "5/5 live"
+
+
+def test_capacity_note_lists_only_full_courses(status_page, qa_course, second_course, status_api, status_title):
+    """STATUS_019: posting to a full course and a course with room names only the full one."""
+    [course_name], [second_name] = qa_course.values(), second_course.values()
+    create_polls(status_page, qa_course, status_title, StatusPage.LIVE_LIMIT)
+
+    status_page.open_add_popup()
+    status_page.select_course(course_name)
+    wait_for_capacity(status_page, lambda: status_page.select_course(second_name))
+
+    # Text only: the note's visibility is checked by STATUS_014
+    expect(status_page.capacity_note.locator("div")).to_have_count(1)
+    expect(status_page.capacity_note).to_contain_text(f"{course_name} is full (5/5)")
+    expect(status_page.capacity_note).not_to_contain_text(second_name)
+    expect(status_page.replace_oldest_checkbox).to_be_visible()
+
+
+@pytest.mark.skip(
+    reason="Needs the student feed (GET /api/v3/status/?course=<id>) and a student test account, "
+    "which this suite does not have."
+)
+def test_feed_returns_max_live():
+    """STATUS_020: the student feed carries max_live: 5, so the app never hard-codes the limit."""
+
+
+# ---------- STATUS_021 - STATUS_039: EduPolls (Status v2) ----------
+
+POLL_ERRORS = {
+    "poll_question": "Write the question.",
+    "poll_options_empty": "Fill in every option or remove the empty one.",
+    "poll_options_same": "Two options are the same.",
+    "poll_correct": "Pick the correct answer.",
+}
+
+
+def test_edupoll_shows_poll_fields_only(status_page):
+    """STATUS_021: the EduPoll type shows Poll kind, Question and 2 option rows (a, b) with a
+    correct-answer radio each, and hides title, caption, video, share and save."""
+    status_page.open_add_popup()
+
+    status_page.choose_type("EduPoll")
+
+    expect(status_page.poll_fields).to_be_visible()
+    expect(status_page.poll_kind_select).to_have_value("quiz")
+    expect(status_page.poll_keys).to_have_text(["a", "b"])
+    expect(status_page.poll_option_inputs).to_have_count(2)
+    expect(status_page.poll_correct_radios).to_have_count(2)
+    for radio in status_page.poll_correct_radios.all():
+        expect(radio).to_be_visible()
+    expect(status_page.poll_question_count).to_have_text(question_count(0, 0))
+    expect(status_page.poll_preview_question).to_have_text("Your question appears here")
+    for hidden in (
+        status_page.title_input,
+        status_page.caption_input,
+        status_page.video_url_input,
+        status_page.share_checkbox,
+        status_page.save_checkbox,
+    ):
+        expect(hidden).to_be_hidden()
+
+    status_page.choose_type("Edureel")
+
+    expect(status_page.poll_fields).to_be_hidden()
+    expect(status_page.title_input).to_be_visible()
+
+
+@pytest.mark.parametrize("count", [2, 5])
+def test_create_edupoll(status_page, qa_course, status_api, status_title, count):
+    """STATUS_022 / STATUS_035: a Quiz poll with 2 or 5 options is saved with keys a-e and one
+    correct option; the card shows the question and "EduPoll · <n> options"."""
+    [course_id], [course_name] = qa_course, qa_course.values()
+    options = ("Momentum", "Force", "Energy", "Power", "Pressure")[:count]
+    question = f"{status_title} Which quantity has the dimensions [M L T⁻²]?"
+
+    status_page.fill_status("EduPoll", qa_course, **poll(question, options))
+
+    expect(status_page.poll_keys).to_have_text(list("abcde"[:count]))
+    status_page.save()
+
+    expect_saved(status_page)
+    [status_id] = status_api.ids_matching(course_name)
+    detail = status_api.detail(status_id)
+    assert detail["post_type"] == 4
+    assert detail["poll_kind"] == "quiz"
+    assert detail["poll_question"] == question
+    assert detail["poll_options"] == [
+        {"key": key, "text": text, "is_correct": index == 1}
+        for index, (key, text) in enumerate(zip("abcde", options))
+    ]
+    assert (detail["title"], detail["caption"]) == ("", "")
+    assert (detail["allow_save"], detail["allow_share"]) == (False, False)
+    assert detail["locked"] is False
+    status_page.open(course=course_id)
+    expect(status_page.card_badges(status_id)).to_have_text(["EduPoll", "Live"])
+    expect(status_page.card_title(status_id)).to_have_text(question)
+    expect(status_page.card(status_id)).to_contain_text(f"EduPoll · {count} options")
+
+
+def test_create_opinion_poll_without_correct_answer(status_page, qa_course, status_api, status_title):
+    """STATUS_022 (Opinion): an Opinion poll hides the correct-answer radios and saves with no
+    correct option. (Opinion polls are in the build but not in the PRD.)"""
+    [course_name] = qa_course.values()
+    status_page.fill_status(
+        "EduPoll", qa_course, poll_kind="Opinion", **poll(f"{status_title} opinion", ("Yes", "No"), correct=None)
+    )
+
+    for radio in status_page.poll_correct_radios.all():
+        expect(radio).to_be_hidden()
+    status_page.save()
+
+    expect_saved(status_page)
+    [status_id] = status_api.ids_matching(course_name)
+    detail = status_api.detail(status_id)
+    assert detail["poll_kind"] == "opinion"
+    assert [option["is_correct"] for option in detail["poll_options"]] == [False, False]
+
+
+def test_create_edupoll_with_optional_image(status_page, qa_course, status_api, status_title):
+    """STATUS_022 (image): an EduPoll can carry one image shown above the question."""
+    [course_name] = qa_course.values()
+    status_page.fill_status("EduPoll", qa_course, images=[png(1080, 1920)], **poll(f"{status_title} image"))
+    status_page.save()
+
+    expect_saved(status_page)
+    [status_id] = status_api.ids_matching(course_name)
+    assert len(status_api.detail(status_id)["images"]) == 1
+
+
+# Shape of the poll image card in the app, per poll kind:
+# (ratio, CSS aspect-ratio of the preview, an image of that shape, a square 1080px image cropped to it)
+POLL_IMAGE_SHAPES = {
+    "Quiz": ("16:10", "16 / 10", (1600, 1000), (1080, 675)),
+    "Opinion": ("3:2", "3 / 2", (1500, 1000), (1080, 720)),
+}
+
+
+def not_poll_shape_warning(ratio: str) -> str:
+    return (f"This image is not {ratio} — the app shows a poll image at about that shape. "
+            "Use “✎ Crop to app size” to fit it. You can still save.")
+
+
+@pytest.mark.parametrize("kind", list(POLL_IMAGE_SHAPES))
+def test_edupoll_image_preview_matches_app_shape(status_page, kind):
+    """STATUS_022 (image): the poll image is previewed in the app's card shape for the poll kind
+    (Quiz 16:10, Opinion 3:2), and an image of that shape is accepted without a warning.
+
+    Observed: [Opinion] fails. The poll image is set up as 16:10 for both kinds; the app shows an
+    Opinion poll image at 3:2."""
+    ratio, css_ratio, (width, height), _ = POLL_IMAGE_SHAPES[kind]
+    status_page.open_add_popup()
+    status_page.choose_type("EduPoll")
+    status_page.choose_poll_kind(kind)
+
+    status_page.add_images([png(width, height)])
+
+    expect(status_page.poll_image_note).to_contain_text(f"about {ratio}")
+    expect(status_page.image_preview_frame(0)).to_have_css("aspect-ratio", css_ratio)
+    expect(status_page.image_preview_meta(0)).to_have_text(f"{width}×{height} · landscape ✓")
+    expect(status_page.image_preview_control(0, "edit")).to_have_text("✎ Edit")
+    expect(status_page.image_warning).to_be_hidden()
+
+
+@pytest.mark.parametrize("kind", list(POLL_IMAGE_SHAPES))
+def test_edupoll_vertical_image_is_warned(status_page, kind):
+    """STATUS_022 (image): a 9:16 image on a poll is flagged against the poll kind's shape and
+    offered "Crop to app size" (advisory: it can still be saved).
+
+    Observed: [Opinion] fails. The poll image is set up as 16:10 for both kinds; the app shows an
+    Opinion poll image at 3:2."""
+    ratio = POLL_IMAGE_SHAPES[kind][0]
+    status_page.open_add_popup()
+    status_page.choose_type("EduPoll")
+    status_page.choose_poll_kind(kind)
+
+    status_page.add_images([png(1080, 1920)])
+
+    expect(status_page.image_preview_meta(0)).to_have_text(f"1080×1920 · 9:16.0 ⚠ {ratio} matches the app")
+    expect(status_page.image_preview_control(0, "edit")).to_have_text("✎ Crop to app size")
+    expect(status_page.image_warning).to_have_text(not_poll_shape_warning(ratio))
+    expect(status_page.field_error("images")).to_be_empty()
+
+
+@pytest.mark.parametrize("kind", list(POLL_IMAGE_SHAPES))
+def test_edupoll_crop_image_to_app_size(status_page, qa_course, status_api, status_title, kind):
+    """STATUS_022 (image): "Crop to app size" starts at the poll kind's shape, and the cropped
+    image is saved at that shape (a square 1080px image: Quiz 1080×675, Opinion 1080×720).
+
+    Observed: [Opinion] fails. The poll image is set up as 16:10 for both kinds; the app shows an
+    Opinion poll image at 3:2."""
+    [course_name] = qa_course.values()
+    ratio, _, _, (width, height) = POLL_IMAGE_SHAPES[kind]
+    status_page.fill_status(
+        "EduPoll", qa_course, images=[png(1080, 1080)], poll_kind=kind,
+        **poll(f"{status_title} {kind} image", correct=1 if kind == "Quiz" else None),
+    )
+
+    status_page.open_image_editor(0)
+
+    expect(status_page.editor_active_ratio).to_have_text(ratio)
+    expect(status_page.editor_output).to_have_text(f"Output {width}×{height} · landscape ✓")
+
+    status_page.apply_crop()
+
+    expect(status_page.toast(f"Image updated · {width}×{height}")).to_be_visible()
+    expect(status_page.image_preview_meta(0)).to_have_text(f"{width}×{height} · landscape ✓")
+    expect(status_page.image_warning).to_be_hidden()
+
+    status_page.save()
+
+    expect_saved(status_page)
+    [status_id] = status_api.ids_matching(course_name)
+    assert stored_image_sizes(status_page, status_api, status_id) == [(width, height)]
+
+
+def test_edupoll_image_shape_follows_poll_kind(status_page):
+    """STATUS_022 (image): changing the poll kind after adding an image switches the preview to
+    that kind's shape.
+
+    Observed: fails. The preview stays 16:10 when the kind is changed to Opinion (expected 3:2)."""
+    status_page.open_add_popup()
+    status_page.choose_type("EduPoll")
+    status_page.add_images([png(1600, 1000)])
+
+    for kind in ("Opinion", "Quiz"):
+        ratio, css_ratio, _, _ = POLL_IMAGE_SHAPES[kind]
+        status_page.choose_poll_kind(kind)
+        expect(status_page.poll_image_note).to_contain_text(f"about {ratio}")
+        expect(status_page.image_preview_frame(0)).to_have_css("aspect-ratio", css_ratio)
+
+
+def test_add_and_remove_option_limits(status_page):
+    """STATUS_023: "+ Add option" adds rows up to 5 and then disappears; rows can be removed
+    only while there are more than 2."""
+    status_page.open_add_popup()
+    status_page.choose_type("EduPoll")
+    expect(status_page.poll_remove_buttons).to_have_count(0)
+
+    for count in range(3, 6):
+        status_page.add_poll_option()
+        expect(status_page.poll_rows).to_have_count(count)
+
+    expect(status_page.poll_keys).to_have_text(list("abcde"))
+    expect(status_page.poll_add_button).to_be_hidden()
+    expect(status_page.poll_remove_buttons).to_have_count(5)
+
+    for count in range(4, 1, -1):
+        status_page.remove_poll_option(0)
+        expect(status_page.poll_rows).to_have_count(count)
+        expect(status_page.poll_add_button).to_be_visible()
+
+    expect(status_page.poll_remove_buttons).to_have_count(0)
+
+
+@pytest.mark.parametrize(
+    "question, options, correct, field, message",
+    [
+        ("", ("A", "B"), 0, "poll_question", POLL_ERRORS["poll_question"]),
+        ("   ", ("A", "B"), 0, "poll_question", POLL_ERRORS["poll_question"]),
+        ("Q", ("A", ""), 0, "poll_options", POLL_ERRORS["poll_options_empty"]),
+        ("Q", ("A", "   "), 0, "poll_options", POLL_ERRORS["poll_options_empty"]),
+        ("Q", ("Force", " force "), 0, "poll_options", POLL_ERRORS["poll_options_same"]),
+        ("Q", ("A", "B"), None, "poll_correct", POLL_ERRORS["poll_correct"]),
+    ],
+    ids=["no-question", "blank-question", "empty-option", "blank-option", "same-options", "no-correct-answer"],
+)
+def test_edupoll_validation_blocks_save(status_page, qa_course, status_api, question, options, correct, field, message):
+    """STATUS_024: Save is blocked with the error beside the field for a missing question, an
+    empty option, two options that are the same (trimmed, ignoring case) or no correct answer."""
+    status_page.fill_status("EduPoll", qa_course, question=question, options=list(options), correct=correct)
+    status_page.save()
+
+    expect(status_page.field_error(field)).to_have_text(message)
+    expect_nothing_saved(status_page, status_api, next(iter(qa_course)))
+
+
+def test_edupoll_text_length_limits(status_page):
+    """STATUS_025: the question takes at most 250 characters and each option at most 80."""
+    status_page.open_add_popup()
+    status_page.choose_type("EduPoll")
+
+    status_page.fill_poll_question("q" * (StatusPage.POLL_QUESTION_MAX + 10))
+    status_page.poll_option_inputs.first.fill("o" * (StatusPage.POLL_OPTION_MAX + 10))
+
+    expect(status_page.poll_question_input).to_have_value("q" * StatusPage.POLL_QUESTION_MAX)
+    expect(status_page.poll_question_count).to_have_text(question_count(StatusPage.POLL_QUESTION_MAX, 1))
+    expect(status_page.poll_option_inputs.first).to_have_value("o" * StatusPage.POLL_OPTION_MAX)
+
+
+def test_edupoll_question_line_limit(status_page):
+    """STATUS_025: the question takes at most 5 lines - pasted text keeps only the first 5 lines,
+    Enter does nothing on the 5th line, and blank lines are not counted."""
+    status_page.open_add_popup()
+    status_page.choose_type("EduPoll")
+    max_lines = StatusPage.POLL_QUESTION_MAX_LINES
+    lines = [f"line{number}" for number in range(1, max_lines + 3)]
+    kept = "\n".join(lines[:max_lines])
+
+    status_page.fill_poll_question("\n".join(lines))
+    expect(status_page.poll_question_input).to_have_value(kept)
+    expect(status_page.poll_question_count).to_have_text(question_count(len(kept), max_lines))
+
+    status_page.fill_poll_question("")
+    status_page.poll_question_input.click()
+    for number, line in enumerate(lines, start=1):
+        status_page.page.keyboard.type(line)
+        if number < len(lines):
+            status_page.page.keyboard.press("Enter")
+    typed = kept + "".join(lines[max_lines:])  # the extra lines run on in the 5th line
+    expect(status_page.poll_question_input).to_have_value(typed)
+    expect(status_page.poll_question_count).to_have_text(question_count(len(typed), max_lines))
+
+    status_page.fill_poll_question("first\n\n\nlast")
+    expect(status_page.poll_question_count).to_have_text(question_count(len("first\n\n\nlast"), 2))
+
+
+def question_count(characters: int, lines: int) -> str:
+    """The poll question counter text, e.g. "0/250 · 0/5 lines"."""
+    return (f"{characters}/{StatusPage.POLL_QUESTION_MAX} · "
+            f"{lines}/{StatusPage.POLL_QUESTION_MAX_LINES} lines")
+
+
+def text_of_length(seed: str, length: int) -> str:
+    """`seed` repeated to exactly `length` characters, with no space at either end."""
+    text = (seed * (length // len(seed) + 1))[:length].strip()
+    return text + "." * (length - len(text))
+
+
+MALAYALAM = "ഒരു വസ്തുവിന്റെ ത്വരണം കണ്ടുപിടിക്കുക "
+
+
+@pytest.mark.parametrize("language", ["malayalam", "unicode-formula"])
+def test_edupoll_text_is_saved_unchanged(status_page, qa_course, status_api, language):
+    """STATUS_026 - STATUS_027: a 250-character Malayalam question with 80-character Malayalam
+    options (limits counted in characters, not bytes) and Unicode formulas are saved as typed."""
+    [course_id], [course_name] = qa_course, qa_course.values()
+    if language == "malayalam":
+        question = text_of_length(f"{STATUS_PREFIX} {MALAYALAM}", StatusPage.POLL_QUESTION_MAX)
+        options = [text_of_length(f"({number}) {MALAYALAM}", StatusPage.POLL_OPTION_MAX) for number in range(1, 6)]
+    else:
+        question = f"{STATUS_PREFIX} Which has the dimensions [M L T⁻²] and units kg·m·s⁻²?"
+        options = ["[M L² T⁻²]", "[M L T⁻²]", "[M⁰ L T⁻¹]", "√(2gh) ≈ v₀"]
+
+    status_page.fill_status("EduPoll", qa_course, **poll(question, tuple(options)))
+    expect(status_page.poll_question_input).to_have_value(question)
+    status_page.save()
+
+    expect_saved(status_page)
+    [status_id] = status_api.ids_matching(course_name)
+    detail = status_api.detail(status_id)
+    assert detail["poll_question"] == question
+    assert [option["text"] for option in detail["poll_options"]] == options
+    status_page.open(course=course_id)
+    expect(status_page.card_title(status_id)).to_have_text(question)
+
+
+def test_removing_middle_option_relabels(status_page):
+    """STATUS_028 / STATUS_030: labels follow position, so removing (b) of 5 relabels the rest
+    a-d, and the correct answer stays on its option."""
+    status_page.open_add_popup()
+    status_page.choose_type("EduPoll")
+    status_page.fill_poll_question("Q")
+    status_page.fill_poll_options(["A", "B", "C", "D", "E"])
+    status_page.mark_correct(3)  # "D"
+
+    status_page.remove_poll_option(1)
+
+    expect(status_page.poll_keys).to_have_text(["a", "b", "c", "d"])
+    assert [box.input_value() for box in status_page.poll_option_inputs.all()] == ["A", "C", "D", "E"]
+    expect(status_page.poll_correct_radios.nth(2)).to_be_checked()
+    expect(status_page.poll_preview_options).to_have_text(["(a) A", "(b) C", "(c) D ✓", "(d) E"])
+
+
+def test_removing_correct_option_clears_choice(status_page, qa_course, status_api, status_title):
+    """STATUS_031: removing the correct option clears the choice, and Save asks for a new one."""
+    status_page.fill_status("EduPoll", qa_course, **poll(f"{status_title} removed", ("A", "B", "C"), correct=1))
+
+    status_page.remove_poll_option(1)
+
+    for radio in status_page.poll_correct_radios.all():
+        expect(radio).not_to_be_checked()
+    status_page.save()
+
+    expect(status_page.field_error("poll_correct")).to_have_text(POLL_ERRORS["poll_correct"])
+    expect_nothing_saved(status_page, status_api, next(iter(qa_course)))
+
+
+def test_edupoll_preview_and_long_text_warning(status_page):
+    """STATUS_032: the phone preview shows the question and labelled options with a tick on the
+    correct one, and warns when the text is long (question over 180 or an option over 60 chars)."""
+    status_page.open_add_popup()
+    status_page.choose_type("EduPoll")
+    status_page.fill_poll_question("Which is a vector?")
+    status_page.fill_poll_options(["Mass", "Force"])
+    status_page.mark_correct(1)
+
+    expect(status_page.poll_preview_question).to_have_text("Which is a vector?")
+    expect(status_page.poll_preview_options).to_have_text(["(a) Mass", "(b) Force ✓"])
+    expect(status_page.poll_overflow_warning).to_be_hidden()
+
+    status_page.fill_poll_question("q" * 181)
+    expect(status_page.poll_overflow_warning).to_have_text(StatusPage.POLL_LONG_TEXT_WARNING)
+
+    status_page.fill_poll_question("q" * 180)
+    expect(status_page.poll_overflow_warning).to_be_hidden()
+
+    status_page.poll_option_inputs.first.fill("o" * 61)
+    expect(status_page.poll_overflow_warning).to_be_visible()
+
+
+def test_edupoll_with_course_link(status_page, qa_course, qa_tree, status_api, status_title):
+    """STATUS_033: an EduPoll takes the same per-course link as the other types."""
+    [course_id], [course_name] = qa_course, qa_course.values()
+    label = " › ".join(qa_tree[name]["name"] for name in LINK_LEVELS[:2])
+    status_page.fill_status("EduPoll", qa_course, links={course_id: label}, **poll(f"{status_title} link"))
+    status_page.save()
+
+    expect_saved(status_page)
+    [status_id] = status_api.ids_matching(course_name)
+    [placement] = status_api.detail(status_id)["placements"]
+    assert str(placement["link"]) == qa_tree["chapter"]["id"]
+
+
+def test_search_and_type_filter_find_edupoll(status_page, qa_course, status_api, status_title):
+    """STATUS_036: the list search finds a poll by its question, and the type filter
+    "EduPoll" shows it while "Edureel" does not."""
+    [course_id], [course_name] = qa_course, qa_course.values()
+    question = f"{status_title} searchable question"
+    status_page.create_status("EduPoll", qa_course, **poll(question))
+    [status_id] = status_api.ids_matching(course_name)
+
+    status_page.open(course=course_id)
+    status_page.filter_by_type("EduPoll")
+    expect_shown(status_page, status_id)
+    status_page.filter_by_type("Edureel")
+    expect(status_page.empty_results).to_be_visible()
+
+    status_page.open()
+    status_page.search(question)
+    expect_shown(status_page, status_id)
+
+
+def test_unanswered_edupoll_can_be_edited(status_page, qa_course, status_api, status_title):
+    """STATUS_037: before anyone answers, the question, options and correct answer can be changed."""
+    [course_id], [course_name] = qa_course, qa_course.values()
+    status_page.create_status("EduPoll", qa_course, **poll(f"{status_title} before", ("A", "B")))
+    [status_id] = status_api.ids_matching(course_name)
+    status_page.open(course=course_id)
+
+    status_page.open_edit_popup(status_id)
+
+    expect(status_page.poll_locked_note).to_be_hidden()
+    expect(status_page.poll_question_input).to_have_value(f"{status_title} before")
+    expect(status_page.poll_correct_radios.nth(1)).to_be_checked()
+    status_page.fill_poll_question(f"{status_title} after")
+    status_page.fill_poll_options(["A", "B", "C"])
+    status_page.mark_correct(2)
+    status_page.save()
+
+    expect_saved(status_page)
+    detail = status_api.detail(status_id)
+    assert detail["poll_question"] == f"{status_title} after"
+    assert [(option["text"], option["is_correct"]) for option in detail["poll_options"]] == [
+        ("A", False), ("B", False), ("C", True)
+    ]
+
+
+@pytest.mark.skip(
+    reason="Needs a student answer (POST /api/v3/status/{id}/answer) and a student test account, "
+    "which this suite does not have."
+)
+def test_answered_edupoll_is_locked():
+    """STATUS_038: once one student has answered, the question, options and correct answer are
+    read-only, the "already answered" note shows and the type cannot change."""
+
+
 # ---------- Status list: search, filters, grouping, view mode, paging ----------
 
 
@@ -865,8 +1448,9 @@ def test_search_without_match_shows_empty_state(status_list, text):
 
 
 @pytest.mark.parametrize(
-    "post_type, expected", [("Edureel", ["reel", "off"]), ("Edusnap", ["snap"]), ("Edusnap set", [])],
-    ids=["edureel", "edusnap", "edusnap-set"],
+    "post_type, expected",
+    [("Edureel", ["reel", "off"]), ("Edusnap", ["snap"]), ("Edusnap set", []), ("EduPoll", [])],
+    ids=["edureel", "edusnap", "edusnap-set", "edupoll"],
 )
 def test_filter_by_type(status_list, listed_statuses, post_type, expected):
     """Status list: the type filter shows only statuses of that type."""

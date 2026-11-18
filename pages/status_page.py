@@ -1,9 +1,14 @@
 """Page Object for the Content Dashboard > Status page (/content/status/list).
 
-Statuses are Edureels (a video URL), Edusnaps (1 image) or Edusnap sets (2-3 images),
-posted to one or more courses (or to batches of one course). Each course can link to a
-chapter / topic / sub-topic; the default is "No link". A course holds at most 3 live
-statuses; a status is live for 24h from its publish date and time.
+Statuses are Edureels (a video URL), Edusnaps (1 image), Edusnap sets (2-3 images) or
+EduPolls (a question with 2-5 options, optionally one image), posted to one or more courses
+(or to batches of one course). Each course can link to a chapter / topic / sub-topic; the
+default is "No link". A course holds at most 5 live statuses (LIVE_LIMIT); a status is live
+for 24h from its publish date and time.
+
+An EduPoll is a "Quiz" (exactly one correct answer, picked with a radio button) or an
+"Opinion" poll (no correct answer). It has no title, caption, share or save: the question
+is the content. Option labels a-e follow the order of the rows.
 
 The Create / Edit popup is filled by the page's script and saved over AJAX: errors are
 shown under each field, and the result is a toast. Course, Batch and Link pickers are a
@@ -45,10 +50,15 @@ class StatusPage:
     URL_PATTERN = re.compile(r"/content/status/list")
     SAVED_MESSAGE = "Status saved."
     COURSE_FULL_MESSAGE = 'Course is full — tick "Replace oldest" to make room.'
-    LIVE_LIMIT = 3
+    LIVE_LIMIT = 5
     SAVE_TIMEOUT = 60_000  # the dev server can take >30s to save
 
-    TYPES = {"Edureel": "1", "Edusnap": "2", "Edusnap set": "3"}
+    TYPES = {"Edureel": "1", "Edusnap": "2", "Edusnap set": "3", "EduPoll": "4"}
+    POLL_KINDS = {"Quiz": "quiz", "Opinion": "opinion"}
+    POLL_QUESTION_MAX = 250
+    POLL_QUESTION_MAX_LINES = 5
+    POLL_OPTION_MAX = 80
+    POLL_LONG_TEXT_WARNING = "The text is long: it may need smaller type on a phone."
     AUDIENCES = {"Course": "1", "Batch": "2"}
     NO_LINK = "No link"  # every course's default link choice
     LINK_OPTIONS_TIMEOUT = 30_000
@@ -60,7 +70,8 @@ class StatusPage:
         self.heading = page.get_by_role("heading", name="STATUS", level=1)
         self.limits_note = self.heading.locator("xpath=following-sibling::div")
         self.add_button = page.get_by_role("button", name=re.compile(r"^\W*Add$"))
-        self.analytics_link = page.get_by_role("link", name=re.compile(r"^\W*Analytics$"))
+        # The toolbar link; each card also has its own "Analytics" link (/content/status/analytics/<id>)
+        self.analytics_link = page.locator('a[href="/content/status/analytics"]')
         self.cards = page.locator("#st-results [data-post]")  # grid cards or list-view rows
         # ".out" = a toast fading out (an earlier message), so it is not matched
         self.toasts = page.locator("#st-toasts .st-toast:not(.out)")
@@ -102,6 +113,8 @@ class StatusPage:
         self.image_positions = self.image_previews.locator(".pv-pos")
         self.image_hint = self.dialog.locator("#st-images-hint")
         self.image_warning = self.dialog.locator("#st-images-warn")
+        # EduPoll only: "optional, shown above the question in the app (landscape, about 16:10) ..."
+        self.poll_image_note = self.dialog.locator("#st-img-note")
         self.course_picker = SearchSelect(self.dialog.locator("#st-course-ss"))
         self.course_hint = self.dialog.locator("#st-course-hint")
         self.batch_field = self.dialog.locator("#st-batch-wrap")
@@ -110,7 +123,34 @@ class StatusPage:
         self.title_input = self.dialog.locator("#st-title")
         self.caption_input = self.dialog.locator("#st-caption")
         self.replace_oldest_checkbox = self.dialog.locator("#st-replace")
+        # "<course> is full (5/5): will replace ..." per full course; shown only when one is full
+        self.capacity_note = self.dialog.locator("#st-capacity-note")
+        self.share_checkbox = self.dialog.locator("#st-share")
+        self.save_checkbox = self.dialog.locator("#st-save")
         self.save_button = self.dialog.locator("#st-submit")
+
+        # EduPoll fields (shown only for the EduPoll type)
+        self.poll_fields = self.dialog.locator("#st-poll-wrap")
+        self.poll_kind_select = self.dialog.locator("#st-poll-kind")
+        self.poll_question_input = self.dialog.locator("#st-poll-question")
+        self.poll_question_count = self.dialog.locator("#st-poll-question-count")
+        self.poll_rows = self.dialog.locator("#st-poll-options .poll-row")
+        self.poll_keys = self.poll_rows.locator(".poll-key")
+        self.poll_option_inputs = self.poll_rows.locator("input[name=poll_option]")
+        self.poll_correct_radios = self.poll_rows.locator("input[name=poll_correct]")
+        self.poll_remove_buttons = self.poll_rows.locator("button[title='Remove option']")
+        self.poll_add_button = self.dialog.locator("#st-poll-add")
+        self.poll_preview_question = self.dialog.locator("#st-poll-preview .pq")
+        self.poll_preview_options = self.dialog.locator("#st-poll-preview .po")
+        self.poll_overflow_warning = self.dialog.locator("#st-poll-overflow")
+        self.poll_locked_note = self.dialog.locator("#st-poll-locked")
+
+        # Confirm popup used by list actions (e.g. re-enabling a status in a full course)
+        self.confirm_dialog = page.locator("#stConfirm")
+        self.confirm_title = self.confirm_dialog.locator("#stConfirmTitle")
+        self.confirm_body = self.confirm_dialog.locator("#stConfirmBody")
+        self.confirm_ok_button = self.confirm_dialog.locator("#stConfirmYes")
+        self.confirm_cancel_button = self.confirm_dialog.locator("[data-bs-dismiss=modal]").last
 
         # Image editor (crop / resize), opened from a preview's "✎ Edit" / "✎ Fix / crop"
         self.image_editor = self.dialog.locator("#st-editor")
@@ -124,7 +164,8 @@ class StatusPage:
     # ---------- Locators for a specific field / status ----------
 
     def field_error(self, field: str) -> Locator:
-        """Inline error under a field: post_type, video_url, images, course, batch, link_<course id>."""
+        """Inline error under a field: post_type, video_url, images, course, batch, link_<course id>,
+        poll_question, poll_options, poll_correct."""
         return self.dialog.locator(f'.st-field[data-field="{field}"] .st-err')
 
     def link_row(self, course_id: str) -> Locator:
@@ -240,6 +281,22 @@ class StatusPage:
         with self.page.expect_response(lambda response: f"/content/status/toggle/{status_id}" in response.url):
             self.card(status_id).get_by_role("button", name="Disable").click()
 
+    def click_enable(self, status_id: str) -> None:
+        """Click a disabled card's "Enable" button and wait for the server's answer. In a full
+        course the answer is a "Course is full" confirm popup instead of the status going live."""
+        with self.page.expect_response(lambda response: f"/content/status/toggle/{status_id}" in response.url):
+            self.card(status_id).get_by_role("button", name="Enable").click()
+
+    def confirm(self) -> None:
+        """Click the confirm popup's OK button (e.g. "Replace oldest") and wait for the action."""
+        with self.page.expect_response(lambda response: "/content/status/toggle/" in response.url):
+            self.confirm_ok_button.click()
+        self.confirm_dialog.wait_for(state="hidden")
+
+    def dismiss_confirm(self) -> None:
+        self.confirm_cancel_button.click()
+        self.confirm_dialog.wait_for(state="hidden")
+
     def open_add_popup(self) -> None:
         self.add_button.click()
         self.dialog.wait_for(state="visible")
@@ -331,6 +388,31 @@ class StatusPage:
             self.page.wait_for_timeout(250)
         option.click()
 
+    # ---------- EduPoll ----------
+
+    def choose_poll_kind(self, kind: str) -> None:
+        """"Quiz" or "Opinion"."""
+        self.poll_kind_select.select_option(self.POLL_KINDS[kind])
+
+    def fill_poll_question(self, question: str) -> None:
+        self.poll_question_input.fill(question)
+
+    def add_poll_option(self) -> None:
+        self.poll_add_button.click()
+
+    def remove_poll_option(self, index: int) -> None:
+        self.poll_rows.nth(index).locator("button[title='Remove option']").click()
+
+    def mark_correct(self, index: int) -> None:
+        self.poll_correct_radios.nth(index).check()
+
+    def fill_poll_options(self, options: list[str]) -> None:
+        """Add rows until there are len(options) (the form starts with 2), then fill them in order."""
+        while self.poll_rows.count() < len(options):
+            self.add_poll_option()
+        for index, text in enumerate(options):
+            self.poll_option_inputs.nth(index).fill(text)
+
     def fill_title(self, title: str) -> None:
         self.title_input.fill(title)
 
@@ -367,10 +449,16 @@ class StatusPage:
         caption: str = "",
         replace_oldest: bool = False,
         publish_at: str | None = None,
+        question: str | None = None,
+        options: list[str] = (),
+        correct: int | None = None,
+        poll_kind: str = "Quiz",
     ) -> None:
         """Open the Create popup and fill it. `courses` is {course id: name}; `links` is
         {course id: link label}. A course left out of `links` keeps the default, "No link".
-        `publish_at` ("YYYY-MM-DDTHH:MM", local time) defaults to now; a later time schedules it."""
+        `publish_at` ("YYYY-MM-DDTHH:MM", local time) defaults to now; a later time schedules it.
+        EduPolls take `question`, `options`, `correct` (index of the correct option, Quiz only)
+        and `poll_kind` instead of a title and caption."""
         self.open_add_popup()
         if publish_at is not None:
             self.publish_at_input.fill(publish_at)
@@ -386,9 +474,19 @@ class StatusPage:
             self.select_batch(name)
         for course_id, label in (links or {}).items():
             self.choose_link(course_id, label)
-        self.fill_title(title)
-        self.fill_caption(caption)
-        self.replace_oldest_checkbox.set_checked(replace_oldest)
+        if post_type == "EduPoll":
+            self.choose_poll_kind(poll_kind)
+            if question is not None:
+                self.fill_poll_question(question)
+            self.fill_poll_options(list(options))
+            if correct is not None:
+                self.mark_correct(correct)
+        else:
+            self.fill_title(title)
+            self.fill_caption(caption)
+        if replace_oldest:
+            # The checkbox shows once the course's capacity has been checked and found full
+            self.replace_oldest_checkbox.check()
 
     def create_status(self, *args, **kwargs) -> None:
         """Fill the Create popup and save. The popup closes only when the save succeeds

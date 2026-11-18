@@ -5,6 +5,7 @@ A server-rendered page (no AJAX): summary cards with counts, a "By course" table
 """
 
 import re
+from datetime import datetime
 
 from playwright.sync_api import Locator, Page
 
@@ -20,13 +21,16 @@ class StatusAnalyticsPage:
 
     SUMMARY_LABELS = [
         "All posts", "Live now", "Disabled", "Expired", "Views", "Watched fully", "Likes",
-        "Edureel", "Edusnap", "Edusnap set",
+        "Edureel", "Edusnap", "Edusnap set", "EduPoll",
     ]
     COURSE_HEADERS = ["Course", "Live", "All posts", "Views", "Watched fully", "Likes"]
-    POST_HEADERS = ["Post", "Type", "State", "Views", "Watched fully", "Likes"]
+    POST_HEADERS = ["Post (publish date; click for its analytics)", "Type", "State", "Views", "Watched fully", "Likes"]
     LATEST_LIMIT = 50
     NO_TITLE = "(no title)"
     DATE_FORMAT = "%d %b %Y, %H:%M"  # date under a post's title, e.g. "09 Nov 2026, 17:28"
+    # The word before that date: "Published 09 Nov 2026, 17:28", or "Publishes ..." for a scheduled post
+    PUBLISHED = "Published"
+    PUBLISHES = "Publishes"
 
     def __init__(self, page: Page):
         self.page = page
@@ -81,7 +85,7 @@ class StatusAnalyticsPage:
 
     def post_table_rows(self) -> list[dict]:
         """Latest 50 posts: [{"title", "published", "type", "state", "views", "watched_fully", "likes"}].
-        The Post cell holds the title with the publish date under it."""
+        The Post cell holds the title with "Published <date>" (or "Publishes <date>") under it."""
         rows = self.post_rows.evaluate_all(
             """rows => rows.map(row => {
                 const [post, ...cells] = [...row.cells];
@@ -95,6 +99,13 @@ class StatusAnalyticsPage:
              "views": int(views), "watched_fully": int(watched), "likes": int(likes)}
             for title, published, post_type, state, views, watched, likes in rows
         ]
+
+    @classmethod
+    def published_at(cls, published: str) -> datetime:
+        """The date in a post's "Published <date>" / "Publishes <date>" text."""
+        verb, date = published.split(" ", 1)
+        assert verb in (cls.PUBLISHED, cls.PUBLISHES), f"Unexpected publish text: {published!r}"
+        return datetime.strptime(date, cls.DATE_FORMAT)
 
     def post_row(self, title: str) -> dict:
         [row] = [row for row in self.post_table_rows() if row["title"] == title]
