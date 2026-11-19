@@ -1031,13 +1031,23 @@ POLL_IMAGE_SHAPES = {
     "Opinion": ("3:2", "3 / 2", (1500, 1000), (1080, 720)),
 }
 
+# Known bug (Low): the poll image is set up as 16:10 for both kinds; the app shows an Opinion
+# poll image at 3:2. strict: once it is fixed the test XPASSes and fails the run, so remove
+# this mark then.
+OPINION_SHAPE_BUG = pytest.mark.xfail(
+    reason="Known bug: Opinion poll image uses 16:10 instead of the app's 3:2",
+    raises=AssertionError,
+    strict=True,
+)
+POLL_KINDS = ["Quiz", pytest.param("Opinion", marks=OPINION_SHAPE_BUG)]
+
 
 def not_poll_shape_warning(ratio: str) -> str:
     return (f"This image is not {ratio} — the app shows a poll image at about that shape. "
             "Use “✎ Crop to app size” to fit it. You can still save.")
 
 
-@pytest.mark.parametrize("kind", list(POLL_IMAGE_SHAPES))
+@pytest.mark.parametrize("kind", POLL_KINDS)
 def test_edupoll_image_preview_matches_app_shape(status_page, kind):
     """STATUS_022 (image): the poll image is previewed in the app's card shape for the poll kind
     (Quiz 16:10, Opinion 3:2), and an image of that shape is accepted without a warning.
@@ -1058,7 +1068,7 @@ def test_edupoll_image_preview_matches_app_shape(status_page, kind):
     expect(status_page.image_warning).to_be_hidden()
 
 
-@pytest.mark.parametrize("kind", list(POLL_IMAGE_SHAPES))
+@pytest.mark.parametrize("kind", POLL_KINDS)
 def test_edupoll_vertical_image_is_warned(status_page, kind):
     """STATUS_022 (image): a 9:16 image on a poll is flagged against the poll kind's shape and
     offered "Crop to app size" (advisory: it can still be saved).
@@ -1078,7 +1088,7 @@ def test_edupoll_vertical_image_is_warned(status_page, kind):
     expect(status_page.field_error("images")).to_be_empty()
 
 
-@pytest.mark.parametrize("kind", list(POLL_IMAGE_SHAPES))
+@pytest.mark.parametrize("kind", POLL_KINDS)
 def test_edupoll_crop_image_to_app_size(status_page, qa_course, status_api, status_title, kind):
     """STATUS_022 (image): "Crop to app size" starts at the poll kind's shape, and the cropped
     image is saved at that shape (a square 1080px image: Quiz 1080×675, Opinion 1080×720).
@@ -1110,6 +1120,7 @@ def test_edupoll_crop_image_to_app_size(status_page, qa_course, status_api, stat
     assert stored_image_sizes(status_page, status_api, status_id) == [(width, height)]
 
 
+@OPINION_SHAPE_BUG
 def test_edupoll_image_shape_follows_poll_kind(status_page):
     """STATUS_022 (image): changing the poll kind after adding an image switches the preview to
     that kind's shape.

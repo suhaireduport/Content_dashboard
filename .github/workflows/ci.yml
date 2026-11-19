@@ -46,7 +46,7 @@ jobs:
           TZ: Asia/Kolkata
         # Rewrite the HTML report after every test, so a cancelled or timed-out
         # run still uploads the results it reached
-        run: pytest -o generate_report_on_test=true
+        run: pytest -o generate_report_on_test=true --junitxml=reports/junit.xml
 
       - name: Upload HTML report
         if: always()
@@ -56,3 +56,8 @@ jobs:
           path: reports/report.html
           if-no-files-found: warn
           retention-days: 14
+
+      # Last step, so the counts are the job's last log line and appear on the run's Summary page
+      - name: Test summary
+        if: always()
+        run: python .github/scripts/ci_summary.py reports/junit.xml
